@@ -134,8 +134,11 @@ struct injector
     bool is32bit, hijacked, sc_mem_ready;
     injection_method_t method;
     addr_t exec_func;
+
+    // test
     addr_t sc_addr;
     addr_t write_proc_mem;
+    uint32_t status;
 
     addr_t process_info;
     x86_registers_t saved_regs;
@@ -930,8 +933,8 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
         info->regs->rip = injector->exec_func;
 
-        if (INJECT_METHOD_SHELLCODE == injector->method)
-            injector->sc_mem_ready = 1;
+        //if (INJECT_METHOD_SHELLCODE == injector->method)
+        //    injector->sc_mem_ready = 1;
 
         injector->hijacked = 1;
         PRINT_DEBUG("(debug) virtualalloc ok\n");
@@ -939,15 +942,17 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
         if ( !injector->target_tid )
             injector->target_tid = threadid;
 
+        // test
+        injector->status = 1;
+
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
-    
-    // TODO : find out why it goes into an infinite "INT3 received but .." loop
-    //        when the following is uncommented
-    /*
-    if ( !injector->is32bit && injector->sc_mem_ready && !injector->sc_add)
+
+    // TODO : -> replace status' value with flag
+    //        -> clean the implementation for multiple calls
+    // We need to hijack the target process with a second API call
+    if ( !injector->is32bit && injector->status == 1)
     {
-        injector->sc_addr = info->regs->rax;
         if ( !pass_inputs(injector, info) )
         {
             PRINT_DEBUG("Failed to setup stack for passing inputs!\n");
@@ -959,12 +964,21 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
         injector->hijacked = 1;
         PRINT_DEBUG("(debug) writeprocmem ok\n");
 
+        if ( !injector->target_tid )
+            injector->target_tid = threadid;
+
+        // test
+        injector->status = 2;
+
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
-    */
+
+    if ( !injector->is32bit && injector->status == 2)
+    {
+        // TODO : replace RIP by the address of the shellcode
+    }
 
     if ( !injector->hijacked || info->regs->rip != injector->bp.breakpoint.addr || threadid != injector->target_tid )
-    //if ( !injector->hijacked || threadid != injector->target_tid )
         return 0;
 
     // We are now in the return path from CreateProcessA
@@ -1029,7 +1043,7 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
         injector->rc = 1;
     }
-    else if (INJECT_METHOD_SHELLCODE == injector->method && info->regs->rax && injector->sc_addr)
+    else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 2)
     {
         PRINT_DEBUG("WriteProcessMemory succeed!\n");
 
