@@ -131,11 +131,12 @@ struct injector
     drakvuf_t drakvuf;
     vmi_instance_t vmi;
     const char* rekall_profile;
-    bool is32bit, hijacked, sc_mem_ready;
+    bool is32bit, hijacked;
     injection_method_t method;
     addr_t exec_func;
 
     // test
+    bool sc_mem_ready;
     addr_t sc_addr;
     addr_t write_proc_mem;
     uint32_t status;
@@ -959,6 +960,8 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
             return 0;
         }
 
+        injector->sc_addr = info->regs->rax;
+        PRINT_DEBUG("(debug) RAX : %lx\n", injector->sc_addr);
         info->regs->rip = injector->write_proc_mem;
 
         injector->hijacked = 1;
@@ -975,7 +978,28 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
     if ( !injector->is32bit && injector->status == 2)
     {
+        char buffer[113] = { '\0' };
+
+        PRINT_DEBUG("(debug) hijacking RIP with shellcode's address\n");
         // TODO : replace RIP by the address of the shellcode
+        info->regs->rip = injector->sc_addr;
+        ctx.addr = info->regs->rip;
+
+        // TODO : cant't read and shellcode doesn't exec
+        puts("(debug) content of RIP");
+        if ( VMI_SUCCESS != vmi_read(injector->vmi, &ctx, 113, (void*)buffer, NULL) )
+        {
+            puts("(debug) error while reading RIP..");
+            return VMI_EVENT_RESPONSE_SET_REGISTERS;
+        }
+        for (int i = 0; i < 113; i++)
+            PRINT_DEBUG("%2x ", buffer[i]);
+        putchar('\n');
+
+        // test
+        injector->status = 3;
+
+        return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
 
     if ( !injector->hijacked || info->regs->rip != injector->bp.breakpoint.addr || threadid != injector->target_tid )
@@ -1046,6 +1070,12 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
     else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 2)
     {
         PRINT_DEBUG("WriteProcessMemory succeed!\n");
+
+        injector->rc = 1;
+    }
+    else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 3)
+    {
+        PRINT_DEBUG("Shellcode executed!");
 
         injector->rc = 1;
     }
