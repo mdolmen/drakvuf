@@ -138,7 +138,7 @@ struct injector
     // test
     bool sc_mem_ready;
     addr_t sc_addr;
-    addr_t write_proc_mem;
+    addr_t write_proc_mem, msgbox;
     uint32_t status;
 
     addr_t process_info;
@@ -170,6 +170,7 @@ struct argument
 #define MEM_RESERVE     0x00002000
 #define MEM_PHYSICAL    0x00400000
 #define PAGE_EXECUTE_READWRITE  0x40
+//#define PAGE_EXECUTE_READWRITE  0x4
 
 struct startup_info_32
 {
@@ -668,7 +669,7 @@ bool pass_inputs(struct injector* injector, drakvuf_trap_info_t* info)
             if ( !setup_stack_64(injector, info, &ctx, args, 10) )
                 goto err;
         }
-        else if (INJECT_METHOD_SHELLCODE == injector->method && !injector->sc_mem_ready)
+        else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 0)
         {
             struct argument args[4] = { {0} };
             uint64_t null64 = 0;
@@ -685,13 +686,13 @@ bool pass_inputs(struct injector* injector, drakvuf_trap_info_t* info)
                 goto err;
 
         }
-        else if (INJECT_METHOD_SHELLCODE == injector->method && injector->sc_mem_ready)
+        else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 1)
         {
             struct argument args[5] = { {0} };
             uint64_t handle = -1;
-            size_t size_sc = 10;
             size_t bytes_written = 0;
             // Messagebox("BrokenByte");
+            /*
             char* shellcode = "\x31\xd2\xb2\x30\x64\x8b\x12\x8b\x52\x0c\x8b\x52\x1c\x8b\x42"
             "\x08\x8b\x72\x20\x8b\x12\x80\x7e\x0c\x33\x75\xf2\x89\xc7\x03"
             "\x78\x3c\x8b\x57\x78\x01\xc2\x8b\x7a\x20\x01\xc7\x31\xed\x8b"
@@ -700,14 +701,30 @@ bool pass_inputs(struct injector* injector, drakvuf_trap_info_t* info)
             "\x6f\x8b\x7a\x1c\x01\xc7\x8b\x7c\xaf\xfc\x01\xc7\x68\x79\x74"
             "\x65\x01\x68\x6b\x65\x6e\x42\x68\x20\x42\x72\x6f\x89\xe1\xfe"
             "\x49\x0b\x31\xc0\x51\x50\xff\xd7";
+            */
+            char* shellcode = "BrokenByte";
 
             init_argument(&args[0], ARGUMENT_INT, sizeof(uint64_t), (void*)handle, 0);
             init_argument(&args[1], ARGUMENT_INT, sizeof(uint64_t), (void*)injector->sc_addr, 0);
-            init_argument(&args[2], ARGUMENT_STRING, sizeof(uint64_t), (void*)shellcode, 0);
-            init_argument(&args[3], ARGUMENT_INT, sizeof(uint64_t), (void*)size_sc, 0);
-            init_argument(&args[4], ARGUMENT_INT, sizeof(uint64_t), (void*)&bytes_written, 0);
+            init_argument(&args[2], ARGUMENT_STRING, strlen(shellcode), (void*)shellcode, 0);
+            init_argument(&args[3], ARGUMENT_INT, sizeof(uint64_t), (void*)strlen(shellcode), 0);
+            init_argument(&args[4], ARGUMENT_INT, sizeof(uint64_t), (void*)bytes_written, 0);
 
             if ( !setup_stack_64(injector, info, &ctx, args, 5) )
+                return 0;
+        }
+        else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 2)
+        {
+            struct argument args[4] = { {0} };
+            uint64_t null64 = 0;
+            //char* str = "hello";
+
+            init_argument(&args[0], ARGUMENT_INT, sizeof(uint64_t), (void*)null64, 0);
+            init_argument(&args[1], ARGUMENT_INT, sizeof(uint64_t), (void*)injector->sc_addr, 0);
+            init_argument(&args[2], ARGUMENT_INT, sizeof(uint64_t), (void*)null64, 0);
+            init_argument(&args[3], ARGUMENT_INT, sizeof(uint64_t), (void*)null64, 0);
+
+            if ( !setup_stack_64(injector, info, &ctx, args, 4) )
                 return 0;
         }
     }
@@ -932,8 +949,9 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
     if ( !drakvuf_get_current_thread_id(injector->drakvuf, info->vcpu, &threadid) || !threadid )
         return 0;
 
-    if ( !injector->is32bit && !injector->hijacked && info->regs->rip == injector->bp.breakpoint.addr )
+    if ( !injector->is32bit && info->regs->rip == injector->bp.breakpoint.addr && injector->status == 0 )
     {
+        PRINT_DEBUG("(debug) virtualalloc..\n");
         /* We just hit the RIP from the trapframe */
 
         memcpy(&injector->saved_regs, info->regs, sizeof(x86_registers_t));
@@ -946,41 +964,26 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
         info->regs->rip = injector->exec_func;
 
-        //if (INJECT_METHOD_SHELLCODE == injector->method)
-        //    injector->sc_mem_ready = 1;
-
-        injector->hijacked = 1;
-        PRINT_DEBUG("(debug) virtualalloc ok\n");
-
-        if ( !injector->target_tid )
-            injector->target_tid = threadid;
-
         // test
         injector->status = 1;
 
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
 
-    // TODO : -> replace status' value with flag
-    //        -> clean the implementation for multiple calls
-    // We need to hijack the target process with a second API call
+    // TODO : -> replace status value with flag
     if ( !injector->is32bit && injector->status == 1)
     {
+        PRINT_DEBUG("(debug) writeprocmem..\n");
+
+        injector->sc_addr = info->regs->rax;
+        PRINT_DEBUG("(debug) RAX : %lx\n", injector->sc_addr);
         if ( !pass_inputs(injector, info) )
         {
             PRINT_DEBUG("Failed to setup stack for passing inputs!\n");
             return 0;
         }
 
-        injector->sc_addr = info->regs->rax;
-        PRINT_DEBUG("(debug) RAX : %lx\n", injector->sc_addr);
         info->regs->rip = injector->write_proc_mem;
-
-        injector->hijacked = 1;
-        PRINT_DEBUG("(debug) writeprocmem ok\n");
-
-        if ( !injector->target_tid )
-            injector->target_tid = threadid;
 
         // test
         injector->status = 2;
@@ -988,31 +991,31 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
 
+    // TODO : call MessageBox to check content of the memory area allocated
+    // earlier
     if ( !injector->is32bit && injector->status == 2)
     {
-        char buffer[113] = { '\0' };
-
-        PRINT_DEBUG("(debug) hijacking RIP with shellcode's address\n");
-        // TODO : replace RIP by the address of the shellcode
-        info->regs->rip = injector->sc_addr;
-        ctx.addr = info->regs->rip;
-
-        // TODO : cant't read and shellcode doesn't exec
-        puts("(debug) content of RIP");
-        if ( VMI_SUCCESS != vmi_read(injector->vmi, &ctx, 113, (void*)buffer, NULL) )
+        PRINT_DEBUG("(debug) messagebox..\n");
+        if ( !pass_inputs(injector, info) )
         {
-            puts("(debug) error while reading RIP..");
-            return VMI_EVENT_RESPONSE_SET_REGISTERS;
+            PRINT_DEBUG("Failed to setup stack for passing inputs!\n");
+            return 0;
         }
-        for (int i = 0; i < 113; i++)
-            PRINT_DEBUG("%2x ", buffer[i]);
-        putchar('\n');
+
+        info->regs->rip = injector->msgbox;
+
+        injector->hijacked = 1;
+
+        if ( !injector->target_tid )
+            injector->target_tid = threadid;
 
         // test
         injector->status = 3;
 
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
+
+    // TODO : Why it never goes till here???
 
     if ( !injector->hijacked || info->regs->rip != injector->bp.breakpoint.addr || threadid != injector->target_tid )
         return 0;
@@ -1087,7 +1090,7 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
     }
     else if (INJECT_METHOD_SHELLCODE == injector->method && injector->status == 3)
     {
-        PRINT_DEBUG("Shellcode executed!");
+        PRINT_DEBUG("Shellcode executed!\n");
 
         injector->rc = 1;
     }
@@ -1215,11 +1218,20 @@ int injector_start_app(drakvuf_t drakvuf, vmi_pid_t pid, uint32_t tid, const cha
             goto done;
         }
 
+        lib = "user32.dll";
+        fun = "MessageBoxA";
+        injector.msgbox = drakvuf_exportsym_to_va(injector.drakvuf, eprocess_base, lib, fun);
+        if (!injector.msgbox)
+        {
+            PRINT_DEBUG("Failed to get address of %s!%s\n", lib, fun);
+            goto done;
+        }
+
         lib = "kernel32.dll";
         fun = "VirtualAlloc";
     }
 
-    injector.sc_mem_ready = 0;
+    injector.status = 0;
     injector.sc_addr = 0;
     injector.exec_func = drakvuf_exportsym_to_va(injector.drakvuf, eprocess_base, lib, fun);
     if (!injector.exec_func)
