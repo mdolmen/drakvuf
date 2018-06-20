@@ -135,6 +135,7 @@ typedef enum
     STATUS_ALLOC_OK,
     STATUS_WRITE_OK,
     STATUS_EXEC_OK,
+    GET_LAST_ERROR,
     __STATUS_MAX
 } status_type_t;
 
