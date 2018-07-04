@@ -688,23 +688,56 @@ bool pass_inputs(struct injector* injector, drakvuf_trap_info_t* info)
         {
             struct argument args[5] = { {0} };
             uint64_t handle = -1;
-            size_t size = 11;
-            size_t bytes_written = 0;
-            // Messagebox("BrokenByte");
+            size_t payload_size = 0;
+            size_t bytes_written = 0, bytes_read = 0;
+            size_t mem_size = 4096;
+            FILE* fp = NULL;
+            unsigned char* shellcode = NULL, *tmp = NULL;
+            char buffer[4096] = { '\0' };
             
-            // TODO : craft a 64-but shellcode which returns properly
-            // (ExitProcess(0); or return 0; )
-            
-            char* shellcode = "BrokenByte";
+            if ( !(fp = fopen(injector->target_file, "rb")) )
+                goto err;
+
+            shellcode = g_malloc0(sizeof(char) * mem_size);
+
+            // Get payload from the file
+            tmp = shellcode;
+            while ( (bytes_read = fread(buffer, 1, 4096, fp)) )
+            {
+                if (bytes_read + payload_size > mem_size)
+                {
+                    mem_size *= 2;
+                    shellcode = g_realloc(shellcode, mem_size);
+                    tmp = shellcode;
+                    tmp += payload_size;
+                }
+
+                memcpy(shellcode, buffer, bytes_read);
+                payload_size += bytes_read;
+                tmp += bytes_read;
+            }
+            PRINT_DEBUG("(debug) size of shellcode : %lu\n", payload_size);
+
+            /*
+            unsigned char shellcode[94] =
+            "\x49\xbe\x2f\x85\xe0\xc0\xcc\x9e\xa1\xd9\x54\x5a\xdb\xd6\x66"
+            "\x81\xe2\x30\xf5\x4d\x31\xff\x48\x0f\xae\x02\x41\xb7\x06\x4c"
+            "\x8b\x4a\x08\x49\xff\xcf\x4f\x31\x74\xf9\x22\x4d\x85\xff\x75"
+            "\xf3\x67\x06\x0c\xd8\x0b\xda\x85\xdd\x2e\x85\xe0\xc0\x0b\x9a"
+            "\x85\xdf\x2f\x85\xe0\x4b\xc8\xba\x2a\x95\x0b\x81\xe3\x08\x47"
+            "\x5f\xe9\x5a\xeb\x9d\x23\x3f\x33\x61\x5e\x26\xd0\x7a\x1f\x3f"
+            "\x33\x61\x5e\x26";
+            */
 
             init_argument(&args[0], ARGUMENT_INT, sizeof(uint64_t), (void*)handle, 0);
             init_argument(&args[1], ARGUMENT_INT, sizeof(uint64_t), (void*)injector->sc_addr, 0);
-            init_argument(&args[2], ARGUMENT_STRING, size, (void*)shellcode, 0);
-            init_argument(&args[3], ARGUMENT_INT, sizeof(uint64_t), (void*)size, 0);
+            init_argument(&args[2], ARGUMENT_STRING, payload_size, (void*)shellcode, 0);
+            init_argument(&args[3], ARGUMENT_INT, sizeof(uint64_t), (void*)payload_size, 0);
             init_argument(&args[4], ARGUMENT_INT, sizeof(uint64_t), (void*)bytes_written, 0);
 
             if ( !setup_stack_64(injector, info, &ctx, args, 5) )
                 return 0;
+            g_free(shellcode);
         }
         else if (INJECT_METHOD_SHELLCODE == injector->method && STATUS_WRITE_OK == injector->status)
         {
@@ -959,7 +992,6 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
     if ( !injector->is32bit && !injector->hijacked && info->regs->rip == injector->bp.breakpoint.addr && injector->status == STATUS_NULL )
     {
-        PRINT_DEBUG("(debug) virtualalloc..\n");
         /* We just hit the RIP from the trapframe */
 
         memcpy(&injector->saved_regs, info->regs, sizeof(x86_registers_t));
@@ -972,25 +1004,28 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
         info->regs->rip = injector->exec_func;
 
-        injector->hijacked = 1;
+        if (INJECT_METHOD_SHELLCODE == injector->method)
+        {
+           injector->status = STATUS_ALLOC_OK;
+        }
+        else 
+        {
+            injector->hijacked = 1;
 
-        if ( !injector->target_tid )
-            injector->target_tid = threadid;
-
-        // test
-        if (injector->method == INJECT_METHOD_SHELLCODE)
-            injector->status = STATUS_ALLOC_OK;
+            if ( !injector->target_tid )
+                injector->target_tid = threadid;
+        }
 
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
     }
 
-    // Write payload into memory
+    // Chain the injection with a second function
     if ( !injector->is32bit && info->regs->rip == injector->bp.breakpoint.addr && STATUS_ALLOC_OK == injector->status)
     {
-        PRINT_DEBUG("(debug) writeprocmem..\n");
+        PRINT_DEBUG("Writing payload in memory..\n");
+        PRINT_DEBUG("Payload is at: 0x%lx\n", info->regs->rax);
 
         injector->sc_addr = info->regs->rax;
-        PRINT_DEBUG("(debug) RAX : %lx\n", injector->sc_addr);
         if ( !pass_inputs(injector, info) )
         {
             PRINT_DEBUG("Failed to setup stack for passing inputs!\n");
@@ -999,7 +1034,6 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
         info->regs->rip = injector->write_proc_mem;
 
-        // test
         injector->status = STATUS_WRITE_OK;
 
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
@@ -1008,7 +1042,7 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
     // Execute the payload
     if ( !injector->is32bit && info->regs->rip == injector->bp.breakpoint.addr && STATUS_WRITE_OK == injector->status)
     {
-        PRINT_DEBUG("(debug) executing..\n");
+        PRINT_DEBUG("Executing the payload..\n");
         if ( !pass_inputs(injector, info) )
         {
             PRINT_DEBUG("Failed to setup stack for passing inputs!\n");
@@ -1016,37 +1050,26 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
         }
 
         info->regs->rip = injector->sc_addr;
-        //info->regs->rip = injector->msgbox;
 
-        injector->hijacked = 1;
-
-        if ( !injector->target_tid )
-            injector->target_tid = threadid;
-
-        // test
-        //injector->status = GET_LAST_ERROR;
-
-        return VMI_EVENT_RESPONSE_SET_REGISTERS;
-    }
-
-    // GetLastError()
-    if ( !injector->is32bit && info->regs->rip == injector->bp.breakpoint.addr && GET_LAST_ERROR == injector->status)
-    {
-        PRINT_DEBUG("(debug) getlasterror..\n");
-        if ( !pass_inputs(injector, info) )
+        // DEBUG
+        unsigned char buffer[94] = { '\0' };
+        ctx.addr = injector->sc_addr;
+        if ( VMI_SUCCESS == vmi_read(injector->vmi, &ctx, 94, buffer, NULL) )
         {
-            PRINT_DEBUG("Failed to setup stack for passing inputs!\n");
-            return 0;
+            printf("(debug) vmi_read of RIP: ");
+            for (int i = 0; i < 94; i++)
+                printf("0x%02x ", buffer[i]);
+            putchar('\n');
         }
-
-        info->regs->rip = injector->glerror;
+        else
+            PRINT_DEBUG("(debug) vmi_read failed");
+        // END_DEBUG
 
         injector->hijacked = 1;
 
         if ( !injector->target_tid )
             injector->target_tid = threadid;
 
-        // test
         injector->status = STATUS_EXEC_OK;
 
         return VMI_EVENT_RESPONSE_SET_REGISTERS;
@@ -1054,8 +1077,6 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
 
     if ( !injector->hijacked || info->regs->rip != injector->bp.breakpoint.addr || threadid != injector->target_tid )
         return 0;
-
-    puts("(debug) return path hit!");
 
     // We are now in the return path from CreateProcessA
 
@@ -1113,14 +1134,7 @@ event_response_t injector_int3_cb(drakvuf_t drakvuf, drakvuf_trap_info_t* info)
     else if (INJECT_METHOD_SHELLCODE == injector->method && STATUS_EXEC_OK == injector->status)
     {
         PRINT_DEBUG("Shellcode executed\n");
-
-        char buffer[11] = { '\0' };
-
-        ctx.addr = injector->sc_addr;
-        if ( VMI_SUCCESS == vmi_read(injector->vmi, &ctx, 11, buffer, NULL) )
-            PRINT_DEBUG("(debug) vmi_read : %s\n", buffer);
-        else
-            PRINT_DEBUG("(debug) vmi_read failed");
+        PRINT_DEBUG("RAX : 0x%lx (expexted: 0x7)\n", info->regs->rax);
 
         injector->rc = 1;
     }
