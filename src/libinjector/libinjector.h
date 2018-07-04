@@ -119,7 +119,16 @@ typedef enum
     INJECT_METHOD_SHELLEXEC,
     INJECT_METHOD_SHELLCODE,
     __INJECT_METHOD_MAX
-} injection_method_t;
+}
+injection_method_t;
+
+typedef enum
+{
+    ARGUMENT_STRING,
+    ARGUMENT_STRUCT,
+    ARGUMENT_INT,
+    __ARGUMENT_MAX
+} argument_type_t;
 
 typedef enum
 {
